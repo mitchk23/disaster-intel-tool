@@ -8,9 +8,8 @@ def _now_utc():
     return datetime.now(timezone.utc)
 
 def fetch_usgs_quakes(hours_back=24):
-    """USGS earthquakes past N hours"""
-    endtime = _now_utc()
-    starttime = endtime - timedelta(hours=hours_back)
+    """USGS earthquakes past N hours."""
+    # Use official day/hour feeds; hours_back is applied by choosing the feed
     url = (
         "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_hour.geojson"
         if hours_back <= 1 else
@@ -21,11 +20,11 @@ def fetch_usgs_quakes(hours_back=24):
     js = r.json()
     rows = []
     for f in js.get("features", []):
-        props = f.get("properties", {})
+        props = f.get("properties", {}) or {}
         geom = f.get("geometry", {}) or {}
         coords = geom.get("coordinates", [None, None, None])
         rows.append({
-            "time_utc": datetime.utcfromtimestamp(props.get("time", 0)/1000).replace(tzinfo=timezone.utc),
+            "time_utc": datetime.utcfromtimestamp((props.get("time") or 0)/1000).replace(tzinfo=timezone.utc),
             "magnitude": props.get("mag"),
             "place": props.get("place"),
             "latitude": coords[1],
@@ -39,7 +38,7 @@ def fetch_usgs_quakes(hours_back=24):
     return df
 
 def fetch_gdacs_events(hours_back=24):
-    """GDACS global all-hazards via RSS"""
+    """GDACS global all-hazards via RSS."""
     url = "https://www.gdacs.org/xml/rss.xml"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
@@ -48,7 +47,7 @@ def fetch_gdacs_events(hours_back=24):
     rows = []
     cutoff = _now_utc() - timedelta(hours=hours_back)
     for it in items:
-        title = it.findtext("title") or ""
+        title = (it.findtext("title") or "").strip()
         link = it.findtext("link") or ""
         pubdate = it.findtext("{http://purl.org/dc/elements/1.1/}date") or it.findtext("pubDate") or ""
         lat = it.findtext("{http://www.w3.org/2003/01/geo/wgs84_pos#}lat")
@@ -72,23 +71,26 @@ def fetch_gdacs_events(hours_back=24):
     return df
 
 def fetch_nasa_firms(hours_back=24):
-    """NASA FIRMS global fires (last 24h, VIIRS, NRT)."""
-    # Updated endpoint (NRT VIIRS, 24h, CSV)
+    """NASA FIRMS global fires (VIIRS NRT, last 24h) – updated endpoint."""
     url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/viirs-nrt/viirs_global_24h.csv"
-    r = requests.get(url, timeout=20)
+    r = requests.get(url, timeout=30)
     r.raise_for_status()
 
     df = pd.read_csv(StringIO(r.text))
-    # Build datetime column
+    # Build a datetime column (UTC)
     try:
-        dt = pd.to_datetime(df["acq_date"] + " " + df["acq_time"].astype(str).str.zfill(4),
-                            format="%Y-%m-%d %H%M", utc=True)
+        dt = pd.to_datetime(
+            df["acq_date"] + " " + df["acq_time"].astype(str).str.zfill(4),
+            format="%Y-%m-%d %H%M",
+            utc=True
+        )
         df["time_utc"] = dt
     except Exception:
         df["time_utc"] = pd.NaT
 
     cutoff = _now_utc() - timedelta(hours=hours_back)
-    df = df[df["time_utc"] >= cutoff] if "time_utc" in df else df
+    if "time_utc" in df:
+        df = df[df["time_utc"] >= cutoff]
 
     out = df.rename(columns={
         "latitude": "latitude",
