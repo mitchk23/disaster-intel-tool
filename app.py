@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import json
+import pydeck as pdk
 from datetime import datetime, timezone
 from data_sources import fetch_usgs_quakes, fetch_gdacs_events, fetch_nasa_firms
 from utils import geocode, haversine_km
@@ -68,12 +69,24 @@ if aoi_query:
         st.error(f"Geocoding failed: {e}")
 
 def filter_by_aoi(df, lat_col, lon_col, label):
-    if df.empty or aoi_lat is None:
+    if df is None or df.empty or aoi_lat is None or aoi_lon is None:
         st.markdown(f"**{label}: 0 within {radius_km} km**")
         return pd.DataFrame()
-    df = df.copy()
-    df["distance_km"] = df.apply(lambda r: haversine_km(aoi_lat, aoi_lon, r[lat_col], r[lon_col]), axis=1)
-    f = df[df["distance_km"] <= radius_km].sort_values("distance_km")
+
+    # Clean coords
+    f = df.copy()
+    f = f.dropna(subset=[lat_col, lon_col])
+    f[lat_col] = pd.to_numeric(f[lat_col], errors="coerce")
+    f[lon_col] = pd.to_numeric(f[lon_col], errors="coerce")
+    f = f.dropna(subset=[lat_col, lon_col])
+
+    if f.empty:
+        st.markdown(f"**{label}: 0 within {radius_km} km**")
+        return pd.DataFrame()
+
+    f["distance_km"] = f.apply(lambda r: haversine_km(aoi_lat, aoi_lon, r[lat_col], r[lon_col]), axis=1)
+    f = f[f["distance_km"] <= radius_km].sort_values("distance_km")
+
     st.markdown(f"**{label}: {len(f)} within {radius_km} km**")
     st.dataframe(f, use_container_width=True)
     return f
@@ -85,6 +98,59 @@ with colB:
     f_gdacs = filter_by_aoi(gdacs, "latitude", "longitude", "GDACS")
 with colC:
     f_fires = filter_by_aoi(fires, "latitude", "longitude", "Fires")
+# --- Map view (AOI + events)
+if aoi_lat is not None and aoi_lon is not None:
+    # Combine points we actually have coordinates for
+    def pick(df, lat, lon, label):
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            d = df[[lat, lon]].copy()
+            d.columns = ["lat", "lon"]
+            d["label"] = label
+            return d
+        return pd.DataFrame(columns=["lat","lon","label"])
+
+    points = pd.concat([
+        pick(f_quakes, "latitude", "longitude", "Quake"),
+        pick(f_fires,  "latitude", "longitude", "Fire"),
+        pick(f_gdacs,  "latitude", "longitude", "GDACS"),
+    ], ignore_index=True)
+
+    # layers: AOI ring + points
+    layers = []
+
+    # AOI ring (approx by 60 points on a circle)
+    import math
+    ring = []
+    R = 6371.0
+    rad = radius_km / R
+    for i in range(60):
+        bearing = math.radians(i*6)
+        lat1 = math.radians(aoi_lat); lon1 = math.radians(aoi_lon)
+        lat2 = math.asin(math.sin(lat1)*math.cos(rad) + math.cos(lat1)*math.sin(rad)*math.cos(bearing))
+        lon2 = lon1 + math.atan2(math.sin(bearing)*math.sin(rad)*math.cos(lat1),
+                                 math.cos(rad)-math.sin(lat1)*math.sin(lat2))
+        ring.append([math.degrees(lon2), math.degrees(lat2)])
+
+    layers.append(pdk.Layer(
+        "PolygonLayer",
+        data=[{"polygon": ring}],
+        get_polygon="polygon",
+        stroked=True,
+        filled=False,
+        get_line_width=2,
+    ))
+
+    if not points.empty:
+        layers.append(pdk.Layer(
+            "ScatterplotLayer",
+            data=points,
+            get_position='[lon, lat]',
+            get_radius=4000,  # 4 km marker size
+            pickable=True,
+        ))
+
+    view = pdk.ViewState(latitude=aoi_lat, longitude=aoi_lon, zoom=6)
+    st.pydeck_chart(pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{label}"}))
 
 # --- Quick snapshot / export
 st.subheader("Quick Snapshot")
