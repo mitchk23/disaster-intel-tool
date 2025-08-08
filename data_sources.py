@@ -71,12 +71,33 @@ def fetch_gdacs_events(hours_back=24):
     return df
 
 def fetch_nasa_firms(hours_back=24):
-    """NASA FIRMS global fires (VIIRS NRT, last 24h) – updated endpoint."""
-    url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/viirs-nrt/viirs_global_24h.csv"
-    r = requests.get(url, timeout=30)
-    r.raise_for_status()
+    """NASA FIRMS global fires (VIIRS NRT, last 24h) with header + fallback."""
+    primary = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/viirs-nrt/viirs_global_24h.csv"
+    fallbacks = [
+        # Common alternates (NASA occasionally shuffles names/casing)
+        "https://firms.modaps.eosdis.nasa.gov/data/active_fire/viirs/viirs_global_24h.csv",
+        "https://firms.modaps.eosdis.nasa.gov/data/active_fire/viirs-nrt/VIIRS_I_Global_24h.csv",
+    ]
+    headers = {"User-Agent": "HADRI-Disaster-Intel/1.0"}
 
-    df = pd.read_csv(StringIO(r.text))
+    def try_read(url):
+        r = requests.get(url, headers=headers, timeout=30)
+        r.raise_for_status()
+        return pd.read_csv(StringIO(r.text))
+
+    df = None
+    try:
+        df = try_read(primary)
+    except Exception:
+        for u in fallbacks:
+            try:
+                df = try_read(u)
+                break
+            except Exception:
+                continue
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["time_utc","latitude","longitude","brightness","confidence"])
+
     # Build a datetime column (UTC)
     try:
         dt = pd.to_datetime(
@@ -88,7 +109,7 @@ def fetch_nasa_firms(hours_back=24):
     except Exception:
         df["time_utc"] = pd.NaT
 
-    cutoff = _now_utc() - timedelta(hours=hours_back)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours_back)
     if "time_utc" in df:
         df = df[df["time_utc"] >= cutoff]
 
@@ -99,5 +120,5 @@ def fetch_nasa_firms(hours_back=24):
         "confidence": "confidence"
     })[["time_utc", "latitude", "longitude", "brightness", "confidence"]]
 
-    out = out.sort_values("time_utc", ascending=False).reset_index(drop=True)
+    return out.sort_values("time_utc", ascending=False).reset_index(drop=True)
     return out
